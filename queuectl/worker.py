@@ -7,6 +7,7 @@ import subprocess
 import time
 
 from . import db
+from .backoff import compute_delay
 from .claim import claim_next_job
 from .models import Job, JobState, now_ts
 
@@ -14,27 +15,44 @@ POLL_INTERVAL_SECONDS = 1.0
 
 
 def execute_job(conn, job: Job) -> None:
-    """Run job.command via the shell and record success or failure.
+    """Run job.command via the shell and record the outcome.
 
-    Retry/backoff scheduling is not decided here -- this just runs the
-    command and records the raw outcome; scheduling policy lives with the
-    caller so it can be unit-tested independently of subprocess execution.
+    On failure: if the job still has retry budget left (attempts after
+    this failure < max_retries), it goes back to `failed` with
+    next_retry_at set by the backoff formula -- claim_next_job() already
+    treats a due `failed` job as claimable, so no separate "requeue to
+    pending" step is needed. Once attempts reaches max_retries, it moves
+    to `dead` (the DLQ) permanently.
     """
     result = subprocess.run(job.command, shell=True)
     success = result.returncode == 0
-
     now = now_ts()
+
     if success:
         conn.execute(
             "UPDATE jobs SET state = ?, updated_at = ?, last_error = NULL WHERE id = ?",
             (JobState.COMPLETED, now, job.id),
         )
-    else:
+        return
+
+    attempts = job.attempts + 1
+    last_error = f"exit code {result.returncode}"
+
+    if attempts >= job.max_retries:
         conn.execute(
-            "UPDATE jobs SET state = ?, attempts = attempts + 1, updated_at = ?, "
+            "UPDATE jobs SET state = ?, attempts = ?, updated_at = ?, next_retry_at = NULL, "
             "last_error = ? WHERE id = ?",
-            (JobState.FAILED, now, f"exit code {result.returncode}", job.id),
+            (JobState.DEAD, attempts, now, last_error, job.id),
         )
+        return
+
+    backoff_base = int(db.get_config(conn, "backoff-base"))
+    next_retry_at = now + compute_delay(attempts, backoff_base)
+    conn.execute(
+        "UPDATE jobs SET state = ?, attempts = ?, updated_at = ?, next_retry_at = ?, "
+        "last_error = ? WHERE id = ?",
+        (JobState.FAILED, attempts, now, next_retry_at, last_error, job.id),
+    )
 
 
 def run_forever(worker_index: int) -> None:

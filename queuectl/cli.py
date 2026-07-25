@@ -94,6 +94,33 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dlq_list(args: argparse.Namespace) -> int:
+    args.state = JobState.DEAD
+    return cmd_list(args)
+
+
+def cmd_dlq_retry(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
+    if row is None:
+        print(f"error: no such job: {args.job_id!r}", file=sys.stderr)
+        return 1
+    if row["state"] != JobState.DEAD:
+        print(f"error: job {args.job_id!r} is not in the DLQ (state={row['state']!r})", file=sys.stderr)
+        return 1
+
+    # Resetting attempts to 0: a DLQ retry is a human deciding the job
+    # deserves a fresh run (e.g. they fixed the underlying cause), not an
+    # automatic retry -- see DECISIONS.md.
+    conn.execute(
+        "UPDATE jobs SET state = ?, attempts = 0, next_retry_at = NULL, "
+        "updated_at = ?, last_error = NULL WHERE id = ?",
+        (JobState.PENDING, now_ts(), args.job_id),
+    )
+    print(f"requeued {args.job_id}")
+    return 0
+
+
 def cmd_worker_start(args: argparse.Namespace) -> int:
     procs = [
         multiprocessing.Process(target=worker.run_forever, args=(i,))
@@ -134,6 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_worker_start = worker_sub.add_parser("start", help="start worker(s) in the foreground")
     p_worker_start.add_argument("--count", type=int, default=1, help="number of worker processes")
     p_worker_start.set_defaults(func=cmd_worker_start)
+
+    p_dlq = sub.add_parser("dlq", help="inspect and retry dead-lettered jobs")
+    dlq_sub = p_dlq.add_subparsers(dest="dlq_command", required=True)
+
+    p_dlq_list = dlq_sub.add_parser("list", help="list jobs in the DLQ")
+    p_dlq_list.add_argument("--json", action="store_true", help="print a JSON array to stdout")
+    p_dlq_list.set_defaults(func=cmd_dlq_list)
+
+    p_dlq_retry = dlq_sub.add_parser("retry", help="re-enqueue a dead job")
+    p_dlq_retry.add_argument("job_id")
+    p_dlq_retry.set_defaults(func=cmd_dlq_retry)
 
     return parser
 
