@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import threading
 import time
 
-from . import db
+from . import db, registry
 from .backoff import compute_delay
 from .claim import claim_next_job
 from .models import Job, JobState, now_ts
@@ -74,22 +76,39 @@ def execute_job(conn, job: Job) -> None:
 
 
 def run_forever(worker_index: int) -> None:
-    """Main loop for a single worker OS process. Blocks forever, polling
-    for claimable jobs. Never returns on its own -- the process is
-    expected to be terminated externally (worker stop / SIGTERM / SIGKILL).
+    """Main loop for a single worker OS process.
 
-    Every iteration also checks for jobs abandoned by a crashed worker
-    (reap_expired_leases) before trying to claim new work -- any worker,
-    not just the one that originally claimed a job, can recover it.
+    Registers itself in the `workers` table so `worker stop` (run from a
+    different terminal) can find and signal it, then polls for work until
+    asked to stop.
+
+    Graceful shutdown: SIGTERM/SIGINT set `shutdown`, but execute_job() is
+    never interrupted -- an in-flight job always finishes. The shutdown
+    check only happens *before* claiming the next job. SIGKILL bypasses
+    all of this (it cannot be caught); recovery for that case is
+    reap_expired_leases(), not this handler.
     """
     conn = db.connect()
     pid = os.getpid()
-    while True:
-        backoff_base = int(db.get_config(conn, "backoff-base"))
-        reap_expired_leases(conn, backoff_base)
 
-        job = claim_next_job(conn, pid)
-        if job is None:
-            time.sleep(POLL_INTERVAL_SECONDS)
-            continue
-        execute_job(conn, job)
+    shutdown = threading.Event()
+
+    def _handle_signal(signum, frame):
+        shutdown.set()
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    registry.register(conn, pid)
+    try:
+        while not shutdown.is_set():
+            backoff_base = int(db.get_config(conn, "backoff-base"))
+            reap_expired_leases(conn, backoff_base)
+
+            job = claim_next_job(conn, pid)
+            if job is None:
+                shutdown.wait(POLL_INTERVAL_SECONDS)
+                continue
+            execute_job(conn, job)
+    finally:
+        registry.unregister(conn, pid)

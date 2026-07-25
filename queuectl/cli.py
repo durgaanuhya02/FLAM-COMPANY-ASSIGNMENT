@@ -5,12 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing
+import os
+import signal
 import sqlite3
 import sys
+import time
 import uuid
 from typing import Sequence
 
-from . import db, worker
+from . import db, registry, worker
 from .models import Job, JobState, now_ts
 
 
@@ -130,13 +133,46 @@ def cmd_worker_start(args: argparse.Namespace) -> int:
         p.start()
     print(f"started {len(procs)} worker(s): pids {[p.pid for p in procs]}")
 
-    try:
-        for p in procs:
-            p.join()
-    except KeyboardInterrupt:
-        for p in procs:
-            p.join()
+    # Ctrl+C on this foreground process also reaches the children directly
+    # (same POSIX process group), so they handle their own graceful
+    # shutdown. This loop just keeps waiting for them to actually exit
+    # instead of tearing down on the first KeyboardInterrupt.
+    for p in procs:
+        while p.is_alive():
+            try:
+                p.join(timeout=1)
+            except KeyboardInterrupt:
+                pass
     return 0
+
+
+def cmd_worker_stop(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    pids = registry.list_pids(conn)
+    if not pids:
+        print("no workers registered")
+        return 0
+
+    signaled = []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            signaled.append(pid)
+        except (ProcessLookupError, OSError):
+            registry.unregister(conn, pid)  # stale entry, worker already gone
+
+    print(f"sent stop signal to {len(signaled)} worker(s): {signaled}")
+
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        if not registry.list_pids(conn):
+            print("all workers stopped")
+            return 0
+        time.sleep(0.5)
+
+    remaining = registry.list_pids(conn)
+    print(f"warning: {len(remaining)} worker(s) did not stop within {args.timeout}s: {remaining}", file=sys.stderr)
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -161,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_worker_start = worker_sub.add_parser("start", help="start worker(s) in the foreground")
     p_worker_start.add_argument("--count", type=int, default=1, help="number of worker processes")
     p_worker_start.set_defaults(func=cmd_worker_start)
+
+    p_worker_stop = worker_sub.add_parser("stop", help="gracefully stop all running workers")
+    p_worker_stop.add_argument(
+        "--timeout", type=float, default=30.0, help="seconds to wait for workers to exit"
+    )
+    p_worker_stop.set_defaults(func=cmd_worker_stop)
 
     p_dlq = sub.add_parser("dlq", help="inspect and retry dead-lettered jobs")
     dlq_sub = p_dlq.add_subparsers(dest="dlq_command", required=True)
