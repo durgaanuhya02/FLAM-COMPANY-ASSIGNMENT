@@ -124,6 +124,27 @@ def cmd_dlq_retry(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config_set(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    try:
+        db.set_config(conn, args.key, args.value)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"{args.key} = {args.value}")
+    return 0
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    try:
+        print(db.get_config(conn, args.key))
+    except KeyError:
+        print(f"error: unknown config key: {args.key!r}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_worker_start(args: argparse.Namespace) -> int:
     procs = [
         multiprocessing.Process(target=worker.run_forever, args=(i,))
@@ -214,6 +235,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_dlq_retry = dlq_sub.add_parser("retry", help="re-enqueue a dead job")
     p_dlq_retry.add_argument("job_id")
     p_dlq_retry.set_defaults(func=cmd_dlq_retry)
+
+    p_config = sub.add_parser("config", help="manage configuration")
+    config_sub = p_config.add_subparsers(dest="config_command", required=True)
+
+    p_config_set = config_sub.add_parser("set", help="set a config value")
+    p_config_set.add_argument("key", choices=list(db.DEFAULT_CONFIG))
+    p_config_set.add_argument("value")
+    p_config_set.set_defaults(func=cmd_config_set)
+
+    p_config_get = config_sub.add_parser("get", help="get a config value")
+    p_config_get.add_argument("key", choices=list(db.DEFAULT_CONFIG))
+    p_config_get.set_defaults(func=cmd_config_get)
 
     return parser
 
