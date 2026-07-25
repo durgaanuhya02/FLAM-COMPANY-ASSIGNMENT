@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Sequence
 
-from . import db, registry, worker
+from . import db, registry, webui, worker
 from .models import Job, JobState, now_ts
 
 
@@ -145,6 +145,11 @@ def cmd_config_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    webui.serve(args.port, args.host)
+    return 0
+
+
 def cmd_worker_start(args: argparse.Namespace) -> int:
     procs = [
         multiprocessing.Process(target=worker.run_forever, args=(i,))
@@ -247,6 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_config_get = config_sub.add_parser("get", help="get a config value")
     p_config_get.add_argument("key", choices=list(db.DEFAULT_CONFIG))
     p_config_get.set_defaults(func=cmd_config_get)
+
+    p_dashboard = sub.add_parser("dashboard", help="start a read-only web dashboard (bonus)")
+    p_dashboard.add_argument("--port", type=int, default=8080)
+    p_dashboard.add_argument("--host", default="127.0.0.1")
+    p_dashboard.set_defaults(func=cmd_dashboard)
 
     return parser
 

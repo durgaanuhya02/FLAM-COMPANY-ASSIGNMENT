@@ -103,6 +103,20 @@ queuectl/
   `worker stop` signals every PID it finds there. See DECISIONS.md Q4
   for rejected alternatives.
 
+## Bonus: web dashboard
+
+```bash
+queuectl dashboard --port 8080
+```
+
+A minimal, read-only status page at `http://127.0.0.1:8080/` (auto-refreshes
+every 3s) plus a JSON endpoint at `/api/jobs` (`?state=` filters). Built on
+the stdlib `http.server` -- no framework, keeping the zero-dependency
+property of the rest of the project. It only ever runs `SELECT`s: the
+handler implements `do_GET` and nothing else, so there's no code path that
+can mutate a job from the browser. Binds to localhost only by default
+(`--host` to change that).
+
 ## Testing
 
 ```bash
@@ -126,6 +140,10 @@ python3 -m unittest discover -s tests -t . -v
 
 Scenario 1 (a basic job completes) is exercised implicitly by every
 other test that runs a worker.
+
+- `test_dashboard.py` -- the bonus web dashboard: HTML page renders job
+  data, `/api/jobs` returns correct JSON (with and without a state
+  filter), unknown routes 404
 
 ## Demo recording
 
