@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.queuectl/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.pytest_cache/
+venv/
+.venv/
