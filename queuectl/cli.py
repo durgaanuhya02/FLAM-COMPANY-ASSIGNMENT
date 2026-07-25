@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import sqlite3
 import sys
 import uuid
 from typing import Sequence
 
-from . import db
+from . import db, worker
 from .models import Job, JobState, now_ts
 
 
@@ -93,6 +94,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_worker_start(args: argparse.Namespace) -> int:
+    procs = [
+        multiprocessing.Process(target=worker.run_forever, args=(i,))
+        for i in range(args.count)
+    ]
+    for p in procs:
+        p.start()
+    print(f"started {len(procs)} worker(s): pids {[p.pid for p in procs]}")
+
+    try:
+        for p in procs:
+            p.join()
+    except KeyboardInterrupt:
+        for p in procs:
+            p.join()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="queuectl", description="A CLI background job queue.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -108,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="summary of job states and active workers")
     p_status.set_defaults(func=cmd_status)
+
+    p_worker = sub.add_parser("worker", help="manage worker processes")
+    worker_sub = p_worker.add_subparsers(dest="worker_command", required=True)
+
+    p_worker_start = worker_sub.add_parser("start", help="start worker(s) in the foreground")
+    p_worker_start.add_argument("--count", type=int, default=1, help="number of worker processes")
+    p_worker_start.set_defaults(func=cmd_worker_start)
 
     return parser
 
